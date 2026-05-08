@@ -162,6 +162,11 @@ def run(config: dict, data_dir: str, dataset: str, device: torch.device,
         test_x = torch.FloatTensor(test_wins[:, :W, :]).permute(0, 2, 1)
         test_y = torch.FloatTensor(test_wins[:, W:, :]).permute(0, 2, 1)
 
+        # Skip entities with too few training windows
+        if len(train_x) < tc['batch_size']:
+            logger.info(f'  [skip] only {len(train_x)} training windows < batch_size {tc["batch_size"]}, skipping.')
+            continue
+
         train_loader = DataLoader(
             TensorDataset(train_x, train_y),
             batch_size=tc['batch_size'], shuffle=True, drop_last=True
