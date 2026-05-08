@@ -9,12 +9,17 @@ Usage:
 """
 
 import argparse
+import csv
+import json
+import logging
 import os
 import sys
+import time
 import yaml
 import numpy as np
 import torch
 import torch.nn as nn
+from datetime import datetime
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
@@ -23,19 +28,49 @@ from src.pstg import PSTGModel
 from src.pstg.threshold import DynamicThreshold
 
 
+# ── Logging setup ─────────────────────────────────────────────────────────────
+
+def setup_logger(log_dir: str, run_name: str) -> logging.Logger:
+    os.makedirs(log_dir, exist_ok=True)
+    log_path = os.path.join(log_dir, f'{run_name}.log')
+
+    logger = logging.getLogger('pstg')
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()
+
+    # File handler
+    fh = logging.FileHandler(log_path, encoding='utf-8')
+    fh.setLevel(logging.INFO)
+    # Console handler
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setLevel(logging.INFO)
+
+    fmt = logging.Formatter('%(asctime)s  %(message)s', datefmt='%H:%M:%S')
+    fh.setFormatter(fmt)
+    ch.setFormatter(fmt)
+
+    logger.addHandler(fh)
+    logger.addHandler(ch)
+    logger.info(f'Log file: {log_path}')
+    return logger
+
+
+# ── Data helpers ───────────────────────────────────────────────────────────────
+
 def load_config(path: str) -> dict:
     with open(path) as f:
         return yaml.safe_load(f)
 
 
 def make_windows(data: np.ndarray, window: int, stride: int = 1):
-    """Slide a window over the time axis."""
     T, C = data.shape
     windows = []
     for i in range(0, T - window + 1, stride):
         windows.append(data[i:i + window])
-    return np.stack(windows)  # (n_windows, window, C)
+    return np.stack(windows)
 
+
+# ── Training / evaluation ──────────────────────────────────────────────────────
 
 def train_epoch(model, loader, optimizer, criterion, device):
     model.train()
@@ -65,24 +100,28 @@ def predict(model, loader, device):
 
 
 def compute_errors(preds: np.ndarray, targets: np.ndarray) -> np.ndarray:
-    """Mean absolute error per time step."""
-    return np.abs(preds - targets).mean(axis=(1, 2))  # (n_windows,)
+    return np.abs(preds - targets).mean(axis=(1, 2))
 
 
 def evaluate(pred_labels: np.ndarray, true_labels: np.ndarray):
-    """Compute precision, recall, F0.5 score."""
     tp = np.sum((pred_labels == 1) & (true_labels == 1))
     fp = np.sum((pred_labels == 1) & (true_labels == 0))
     fn = np.sum((pred_labels == 0) & (true_labels == 1))
-
     precision = tp / (tp + fp + 1e-8)
-    recall = tp / (tp + fn + 1e-8)
+    recall    = tp / (tp + fn + 1e-8)
     beta = 0.5
     f_beta = (1 + beta**2) * precision * recall / (beta**2 * precision + recall + 1e-8)
-    return {'precision': precision, 'recall': recall, f'F{beta}': f_beta}
+    return {'precision': float(precision), 'recall': float(recall), f'F{beta}': float(f_beta)}
 
 
-def run(config: dict, data_dir: str, dataset: str, device: torch.device):
+# ── Main run ───────────────────────────────────────────────────────────────────
+
+def run(config: dict, data_dir: str, dataset: str, device: torch.device,
+        log_dir: str, run_name: str):
+    logger = setup_logger(log_dir, run_name)
+    logger.info(f'Dataset: {dataset}  Device: {device}')
+    logger.info(f'Config: {json.dumps(config, indent=2)}')
+
     mc = config['model']
     tc = config['training']
     dc = config['data']
@@ -95,23 +134,29 @@ def run(config: dict, data_dir: str, dataset: str, device: torch.device):
     ])
 
     all_results = []
+    csv_path = os.path.join(log_dir, f'{run_name}_results.csv')
+
+    # Write CSV header
+    with open(csv_path, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=['entity', 'precision', 'recall', 'F0.5', 'time_s'])
+        writer.writeheader()
 
     for entity_id in entity_files:
-        print(f"\n{'='*50}")
-        print(f"Entity: {entity_id}")
+        logger.info(f"\n{'='*50}")
+        logger.info(f'Entity: {entity_id}')
+        t0 = time.time()
 
         train_data = np.load(os.path.join(processed_dir, f'{entity_id}_train.npy'))
-        test_data = np.load(os.path.join(processed_dir, f'{entity_id}_test.npy'))
+        test_data  = np.load(os.path.join(processed_dir, f'{entity_id}_test.npy'))
         true_labels = np.load(os.path.join(processed_dir, f'{entity_id}_labels.npy'))
 
         n_channels = train_data.shape[1]
         W = dc['window_length']
         F = dc['prediction_length']
 
-        # Build sliding windows: input (W,C) -> target (F,C)
         train_wins = make_windows(train_data, W + F, stride=dc['stride'])
-        train_x = torch.FloatTensor(train_wins[:, :W, :]).permute(0, 2, 1)  # (n, C, W)
-        train_y = torch.FloatTensor(train_wins[:, W:, :]).permute(0, 2, 1)  # (n, C, F)
+        train_x = torch.FloatTensor(train_wins[:, :W, :]).permute(0, 2, 1)
+        train_y = torch.FloatTensor(train_wins[:, W:, :]).permute(0, 2, 1)
 
         test_wins = make_windows(test_data, W + F, stride=1)
         test_x = torch.FloatTensor(test_wins[:, :W, :]).permute(0, 2, 1)
@@ -126,7 +171,6 @@ def run(config: dict, data_dir: str, dataset: str, device: torch.device):
             batch_size=ac['test_batch_size'], shuffle=False
         )
 
-        # Build model
         model = PSTGModel(
             n_channels=n_channels,
             seq_len=W,
@@ -137,14 +181,12 @@ def run(config: dict, data_dir: str, dataset: str, device: torch.device):
             n_layers=mc['n_layers'],
             causal_hidden_dim=mc['causal_hidden_dim'],
             causal_lag=mc['causal_lag'],
-            sparsity_k=int(n_channels * mc['sparsity_ratio']),
+            sparsity_k=max(1, int(n_channels * mc['sparsity_ratio'])),
             dropout=mc['dropout'],
         ).to(device)
 
         optimizer = torch.optim.AdamW(
-            model.parameters(),
-            lr=tc['learning_rate'],
-            weight_decay=tc['weight_decay'],
+            model.parameters(), lr=tc['learning_rate'], weight_decay=tc['weight_decay']
         )
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer, T_max=tc['T_max'], eta_min=tc['eta_min']
@@ -152,13 +194,13 @@ def run(config: dict, data_dir: str, dataset: str, device: torch.device):
         criterion = nn.MSELoss()
 
         # Train
-        for epoch in tqdm(range(tc['epochs']), desc=f'Training {entity_id}'):
+        for epoch in tqdm(range(tc['epochs']), desc=f'{entity_id}', leave=False):
             loss = train_epoch(model, train_loader, optimizer, criterion, device)
             scheduler.step()
             if (epoch + 1) % 10 == 0:
-                print(f"  Epoch {epoch+1}/{tc['epochs']}  loss={loss:.4f}")
+                logger.info(f'  Epoch {epoch+1}/{tc["epochs"]}  loss={loss:.4f}')
 
-        # Predict and detect anomalies
+        # Evaluate
         preds, targets = predict(model, test_loader, device)
         errors = compute_errors(preds, targets)
 
@@ -169,42 +211,63 @@ def run(config: dict, data_dir: str, dataset: str, device: torch.device):
         )
         pred_labels_win = detector.detect(errors)
 
-        # Map window-level labels back to time steps
         pred_labels_ts = np.zeros(len(test_data), dtype=int)
         for i, label in enumerate(pred_labels_win):
             if label == 1:
                 pred_labels_ts[i:i + W + F] = 1
 
-        # Trim to match true_labels length
         min_len = min(len(pred_labels_ts), len(true_labels))
         metrics = evaluate(pred_labels_ts[:min_len], true_labels[:min_len])
-        print(f"  Results: {metrics}")
-        all_results.append({'entity': entity_id, **metrics})
+        elapsed = time.time() - t0
+
+        logger.info(
+            f'  Results: P={metrics["precision"]:.3f}  R={metrics["recall"]:.3f}'
+            f'  F0.5={metrics["F0.5"]:.3f}  ({elapsed:.0f}s)'
+        )
+
+        row = {'entity': entity_id, **metrics, 'time_s': round(elapsed, 1)}
+        all_results.append(row)
+
+        # Append to CSV immediately (safe even if run is interrupted)
+        with open(csv_path, 'a', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=['entity', 'precision', 'recall', 'F0.5', 'time_s'])
+            writer.writerow(row)
 
     # Summary
-    print(f"\n{'='*50}")
-    print("Summary:")
+    logger.info(f"\n{'='*50}")
+    logger.info('Summary:')
     for r in all_results:
-        print(f"  {r['entity']}: P={r['precision']:.3f} R={r['recall']:.3f} F0.5={r['F0.5']:.3f}")
+        logger.info(f"  {r['entity']:8s}  P={r['precision']:.3f}  R={r['recall']:.3f}  F0.5={r['F0.5']:.3f}")
 
-    avg_f = np.mean([r['F0.5'] for r in all_results])
-    print(f"\nAverage F0.5: {avg_f:.3f}")
+    avg_f = float(np.mean([r['F0.5'] for r in all_results]))
+    logger.info(f'\nAverage F0.5: {avg_f:.3f}')
+    logger.info(f'Results saved to: {csv_path}')
+
+    # Save full JSON summary
+    summary_path = os.path.join(log_dir, f'{run_name}_summary.json')
+    with open(summary_path, 'w') as f:
+        json.dump({'avg_F0.5': avg_f, 'results': all_results, 'config': config}, f, indent=2)
+    logger.info(f'Summary saved to: {summary_path}')
+
     return all_results
 
 
+# ── Entry point ────────────────────────────────────────────────────────────────
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', default='configs/default.yaml')
+    parser.add_argument('--config',  default='configs/default.yaml')
     parser.add_argument('--dataset', choices=['smap', 'msl'], default='smap')
     parser.add_argument('--data_dir', default='./data')
-    parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
+    parser.add_argument('--device',  default='cuda' if torch.cuda.is_available() else 'cpu')
+    parser.add_argument('--log_dir', default='logs')
     args = parser.parse_args()
 
-    config = load_config(args.config)
-    device = torch.device(args.device)
-    print(f"Using device: {device}")
+    run_name = f'{args.dataset}_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
+    config   = load_config(args.config)
+    device   = torch.device(args.device)
 
-    run(config, args.data_dir, args.dataset, device)
+    run(config, args.data_dir, args.dataset, device, args.log_dir, run_name)
 
 
 if __name__ == '__main__':
