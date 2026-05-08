@@ -1,35 +1,33 @@
-# Default hyperparameters for PSTG with Conditional Causal Graph
-# A4000 16GB friendly config
+# PSTG with Conditional Causal Graph
+# A4000 16GB config: d_model=256, batch=24, safe ~7-8GB
 
 model:
-  patch_sizes: [25, 50, 125]       # Multi-scale patch sizes P
-  main_patch_size: 25              # Primary patch size p_main
-  d_model: 128                     # Model dimension (reduced from 512)
-  n_heads: 4                       # Number of attention heads H
-  n_layers: 2                      # Number of progressive reasoning layers n_L
-  sparsity_ratio: 0.1              # Top-k sparsification ratio gamma
-  dropout: 0.1                     # Dropout rate
-  ffn_dropout: 0.21                # FFN dropout rate
-
-  # Conditional causal graph (patent innovation)
-  use_conditional_causal: true     # Enable conditional Granger causality
-  causal_hidden_dim: 64            # Hidden dim for causal estimator (reduced from 256)
-  causal_lag: 5                    # Lag order for Granger causality test
+  patch_sizes: [25, 50, 125]
+  main_patch_size: 25
+  d_model: 256
+  n_heads: 4
+  n_layers: 2
+  sparsity_ratio: 0.1
+  dropout: 0.1
+  ffn_dropout: 0.21
+  use_conditional_causal: true
+  causal_hidden_dim: 128
+  causal_lag: 5
 
 training:
   learning_rate: 5.0e-4
   weight_decay: 4.0e-4
-  T_max: 70                        # Cosine annealing T_max
-  eta_min: 0                       # Cosine annealing eta_min
-  batch_size: 16                   # Reduced from 64
-  epochs: 30                       # Reduced for faster iteration
+  T_max: 100
+  eta_min: 1.0e-6
+  batch_size: 24
+  epochs: 50
 
 data:
-  window_length: 250               # Sliding window length L
-  prediction_length: 10            # Prediction horizon F
-  stride: 5                        # Increased stride to reduce n_windows
+  window_length: 250
+  prediction_length: 10
+  stride: 3
 
 anomaly_detection:
-  smoothing_base: 30               # n_s: smoothing base factor
-  test_batch_size: 32              # Reduced from 70
-  tuning_percentage: 0.05          # p_s: tuning percentage
+  smoothing_base: 30
+  test_batch_size: 32
+  tuning_percentage: 0.05
