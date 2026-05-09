@@ -209,12 +209,18 @@ def run(config: dict, data_dir: str, dataset: str, device: torch.device,
         preds, targets = predict(model, test_loader, device)
         errors = compute_errors(preds, targets)
 
+        # Compute train errors for adaptive threshold calibration
+        train_preds, train_targets = predict(model, train_loader, device)
+        train_errors = compute_errors(train_preds, train_targets)
+
         detector = DynamicThreshold(
             smoothing_base=ac['smoothing_base'],
             test_batch_size=ac['test_batch_size'],
             tuning_percentage=ac['tuning_percentage'],
+            use_adaptive=ac.get('use_adaptive', True),
         )
-        pred_labels_win = detector.detect(errors)
+        pred_labels_win = detector.detect(errors, train_errors=train_errors)
+        logger.info(f'  Adaptive tuning_p={detector.calibrated_p:.4f}')
 
         pred_labels_ts = np.zeros(len(test_data), dtype=int)
         for i, label in enumerate(pred_labels_win):

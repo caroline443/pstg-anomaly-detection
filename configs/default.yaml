@@ -30,4 +30,5 @@ data:
 anomaly_detection:
   smoothing_base: 30
   test_batch_size: 32
-  tuning_percentage: 0.05
+  tuning_percentage: 0.05      # fallback, used only when use_adaptive=false
+  use_adaptive: true           # calibrate threshold per entity from train errors
