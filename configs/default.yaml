@@ -1,5 +1,6 @@
 # PSTG with Conditional Causal Graph
-# A4000 16GB config: d_model=256, batch=24, safe ~7-8GB
+# A4000 16GB — joint training config
+# d_model=256, batch=64 (joint loader has many more windows, can afford larger batch)
 
 model:
   patch_sizes: [25, 50, 125]
@@ -19,7 +20,9 @@ training:
   weight_decay: 4.0e-4
   T_max: 100
   eta_min: 1.0e-6
-  batch_size: 24
+  # Joint mode: larger batch is fine because the merged dataset is much bigger
+  # Single mode: keep at 24 to avoid OOM on small per-entity datasets
+  batch_size: 64
   epochs: 50
 
 data:
@@ -29,6 +32,6 @@ data:
 
 anomaly_detection:
   smoothing_base: 30
-  test_batch_size: 32
-  tuning_percentage: 0.05      # fallback, used only when use_adaptive=false
+  test_batch_size: 64
+  tuning_percentage: 0.05      # fallback when use_adaptive=false
   use_adaptive: true           # calibrate threshold per entity from train errors
